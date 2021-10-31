@@ -1,135 +1,115 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+// // TODO(eht)
 
-interface MyPluginSettings {
-  mySetting: string;
-}
+// Note: if an actual daily note is created, it's unclear which plugin
+// will run first, this one or the Daily Note core plugin. Whichever one
+// runs last will overwrite the other. Since we're using the same
+// template, it doesn't matter which one wins.
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-  mySetting: 'default'
-}
+// creating a new Daily Note (must match daily note format) in the Daily Notes
+// directory (as defined by the Daily Notes core plugin settings) triggers our
+// plugin to use the template to populate that new file (needs to handle future
+// dates, obviously).
 
-export default class MyPlugin extends Plugin {
-  settings: MyPluginSettings;
+import type { Moment } from "moment";
+import moment from "moment";
+import { Plugin, Notice, TAbstractFile, TFile, normalizePath } from 'obsidian';
+import {
+  appHasDailyNotesPluginLoaded,
+  getDailyNoteSettings,
+} from "obsidian-daily-notes-interface";
+import { instantiateTemplateForDate, } from './template-file';
 
+const kRecentlyCreatedThresholdMillis: number = 1000;
+
+export default class MyPlugin extends Plugin {  // TODO(eht): rename
   async onload() {
-    await this.loadSettings();
+    try {
+      // Give the Daily Note plugin a chance to load.
+      await this.waitForDailyNotesPluginWithTimeout(/*waitMillis=*/1000);
+      this.setupPlugin();
+    } catch(err) {
+      new Notice('_ plugin requires Daily Notes plugin to be enabled');
+      console.log(err);
+    }
+  }
 
-    // This creates an icon in the left ribbon.
-    let ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-      // Called when the user clicks the icon.
-      new Notice('This is a notice!');
-    });
-    // Perform additional things with the ribbon
-    ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-    // This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-    let statusBarItemEl = this.addStatusBarItem();
-    statusBarItemEl.setText('Status Bar Text');
-
-    // This adds a simple command that can be triggered anywhere
-    this.addCommand({
-      id: 'open-sample-modal-simple',
-      name: 'Open sample modal (simple)',
-      callback: () => {
-        new SampleModal(this.app).open();
+  // Assumes Daily Note plugin is loaded.
+  private setupPlugin() {
+    const onFileCreate = (newFile: TAbstractFile) => {
+      let dailyNoteSettings = getDailyNoteSettings();
+      // For some reason, sometimes the extension is missing.
+      if (!dailyNoteSettings.template.endsWith('.md')) {
+        dailyNoteSettings.template += '.md';
       }
-    });
-    // This adds an editor command that can perform some operation on the current editor instance
-    this.addCommand({
-      id: 'sample-editor-command',
-      name: 'Sample editor command',
-      editorCallback: (editor: Editor, view: MarkdownView) => {
-        console.log(editor.getSelection());
-        editor.replaceSelection('Sample Editor Command');
-      }
-    });
-    // This adds a complex command that can check whether the current state of the app allows execution of the command
-    this.addCommand({
-      id: 'open-sample-modal-complex',
-      name: 'Open sample modal (complex)',
-      checkCallback: (checking: boolean) => {
-        // Conditions to check
-        let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (markdownView) {
-          // If checking is true, we're simply "checking" if the command can be run.
-          // If checking is false, then we want to actually perform the operation.
-          if (!checking) {
-            new SampleModal(this.app).open();
-          }
 
-          // This command will only show up in Command Palette when the check function returns true
-          return true;
+      // Filter out the following:
+      //   - Folders. This function is called on creation of each TAbstractFile,
+      //     which TFolder is a subclass of.
+      //   - Files that are not daily notes.
+      //   - Files that are not newly created. Although this function is
+      //     triggered by the vault's 'create' event, that refers to the
+      //     creation of the in-memory file, so we still need to refer to the
+      //     creation time of the stored file.
+      if (!(newFile instanceof TFile)
+          || !this.isDailyNoteFile(newFile, dailyNoteSettings)
+          || !this.isFileNewlyCreated(newFile)) {
+        return;
+      }
+
+      const templateFile: TAbstractFile = this.app.vault.getAbstractFileByPath(dailyNoteSettings.template);
+
+      // Nothing to do if the template file doesn't exist or is not a file.
+      if (templateFile === null || !(templateFile instanceof TFile)) {
+        new Notice('Invalid Daily Notes template file');
+        console.error(`Invalid Daily Notes template file "${dailyNoteSettings.template}".`);
+        return;
+      }
+
+      this.app.vault.read(templateFile).then((contents: string) => {
+        const date: Moment =
+            this.parseDateWithFormat(newFile.basename, dailyNoteSettings.format);
+        this.app.vault.modify(newFile,
+            instantiateTemplateForDate(contents, date));
+      }).catch((err) => {
+        console.log(err);
+      });
+    }
+
+    this.registerEvent(this.app.vault.on('create', onFileCreate));
+  }
+
+  private waitForDailyNotesPluginWithTimeout(waitMillis: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // TODO(eht): maybe stick to moment, rather than Date
+      const startTime = Date.now();
+      const intervalId = window.setInterval(() => {
+        if (appHasDailyNotesPluginLoaded()) {
+          clearInterval(intervalId);
+          resolve();
+        } else if (Date.now() - startTime > waitMillis) {
+          clearInterval(intervalId);
+          reject();
         }
-      }
+      }, 100);
+      this.registerInterval(intervalId);
     });
-
-    // This adds a settings tab so the user can configure various aspects of the plugin
-    this.addSettingTab(new SampleSettingTab(this.app, this));
-
-    // If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-    // Using this function will automatically remove the event listener when this plugin is disabled.
-    this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-      console.log('click', evt);
-    });
-
-    // When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-    this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
   }
 
-  onunload() {
+  // Uses file creation time to determine whether the file is new.
+  private isFileNewlyCreated(f: TFile): boolean {
+    // TODO(eht): maybe stick to moment, rather than Date
+    return (Date.now() - f.stat.ctime < kRecentlyCreatedThresholdMillis);
+  };
 
+  // Determines if the file is a daily note, based on the Daily Notes plugin
+  // settings.
+  private isDailyNoteFile(f: TFile, dailyNoteSettings: any): boolean {  // TODO(eht): any
+    return f.path.startsWith(`${normalizePath(dailyNoteSettings.folder)}/`) &&
+        this.parseDateWithFormat(f.basename, dailyNoteSettings.format).isValid();
   }
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-  }
-
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
-}
-
-class SampleModal extends Modal {
-  constructor(app: App) {
-    super(app);
-  }
-
-  onOpen() {
-    let {contentEl} = this;
-    contentEl.setText('Woah!');
-  }
-
-  onClose() {
-    let {contentEl} = this;
-    contentEl.empty();
-  }
-}
-
-class SampleSettingTab extends PluginSettingTab {
-  plugin: MyPlugin;
-
-  constructor(app: App, plugin: MyPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    let {containerEl} = this;
-
-    containerEl.empty();
-
-    containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
-
-    new Setting(containerEl)
-      .setName('Setting #1')
-      .setDesc('It\'s a secret')
-      .addText(text => text
-        .setPlaceholder('Enter your secret')
-        .setValue(this.plugin.settings.mySetting)
-        .onChange(async (value) => {
-          console.log('Secret: ' + value);
-          this.plugin.settings.mySetting = value;
-          await this.plugin.saveSettings();
-        }));
-  }
+  // Parses the dateString with the given format using the Moment library.
+  private parseDateWithFormat(dateString: string, format: string): Moment {
+    return moment(dateString, format, /*strictMode=*/true);
+  };
 }
