@@ -1,14 +1,15 @@
-// // TODO(eht)
+// lazy-daily-note-templater
+//
+// Currently, clicking on a link to a daily note that doesn't yet exist (aka a
+// lazily initialized daily note) creates a blank page. This plugin populates
+// it with the template specified in the Daily Notes core plugin settings.
+//
+// As a bonus, this plugin also allows for some expanded date/time templating.
 
-// Note: if an actual daily note is created, it's unclear which plugin
-// will run first, this one or the Daily Note core plugin. Whichever one
-// runs last will overwrite the other. Since we're using the same
-// template, it doesn't matter which one wins.
-
-// creating a new Daily Note (must match daily note format) in the Daily Notes
-// directory (as defined by the Daily Notes core plugin settings) triggers our
-// plugin to use the template to populate that new file (needs to handle future
-// dates, obviously).
+// Note: If a daily note is created in a way that triggers the Daily Notes core
+// plugin, it's unclear which plugin will run first. Whichever one runs last
+// will overwrite the other. Since we're using the same template and support all
+// of the same template variables, it doesn't matter much which one wins.
 
 import type { Moment } from "moment";
 import moment from "moment";
@@ -21,23 +22,23 @@ import { instantiateTemplateForDate, } from './template-file';
 
 const kRecentlyCreatedThresholdMillis: number = 1000;
 
-export default class MyPlugin extends Plugin {  // TODO(eht): rename
+export default class LazyDailyNoteTemplaterPlugin extends Plugin {
   async onload() {
     try {
-      // Give the Daily Note plugin a chance to load.
+      // Give the Daily Notes plugin a chance to load.
       await this.waitForDailyNotesPluginWithTimeout(/*waitMillis=*/1000);
       this.setupPlugin();
     } catch(err) {
-      new Notice('_ plugin requires Daily Notes plugin to be enabled');
+      new Notice('LazyDailyNoteTemplater plugin requires Daily Notes plugin to be enabled');
       console.log(err);
     }
   }
 
-  // Assumes Daily Note plugin is loaded.
+  // Assumes Daily Notes plugin is loaded.
   private setupPlugin() {
     const onFileCreate = (newFile: TAbstractFile) => {
       let dailyNoteSettings = getDailyNoteSettings();
-      // For some reason, sometimes the extension is missing.
+      // For some reason, sometimes the file extension is missing.
       if (!dailyNoteSettings.template.endsWith('.md')) {
         dailyNoteSettings.template += '.md';
       }
@@ -56,7 +57,8 @@ export default class MyPlugin extends Plugin {  // TODO(eht): rename
         return;
       }
 
-      const templateFile: TAbstractFile = this.app.vault.getAbstractFileByPath(dailyNoteSettings.template);
+      const templateFile: TAbstractFile =
+          this.app.vault.getAbstractFileByPath(dailyNoteSettings.template);
 
       // Nothing to do if the template file doesn't exist or is not a file.
       if (templateFile === null || !(templateFile instanceof TFile)) {
@@ -69,24 +71,23 @@ export default class MyPlugin extends Plugin {  // TODO(eht): rename
         const date: Moment =
             this.parseDateWithFormat(newFile.basename, dailyNoteSettings.format);
         this.app.vault.modify(newFile,
-            instantiateTemplateForDate(contents, date));
+            instantiateTemplateForDate(newFile.basename, contents, date));
       }).catch((err) => {
         console.log(err);
       });
-    }
+    };
 
     this.registerEvent(this.app.vault.on('create', onFileCreate));
   }
 
   private waitForDailyNotesPluginWithTimeout(waitMillis: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      // TODO(eht): maybe stick to moment, rather than Date
-      const startTime = Date.now();
+      const startTime = moment.now();
       const intervalId = window.setInterval(() => {
         if (appHasDailyNotesPluginLoaded()) {
           clearInterval(intervalId);
           resolve();
-        } else if (Date.now() - startTime > waitMillis) {
+        } else if (moment.now() - startTime > waitMillis) {
           clearInterval(intervalId);
           reject();
         }
@@ -97,13 +98,12 @@ export default class MyPlugin extends Plugin {  // TODO(eht): rename
 
   // Uses file creation time to determine whether the file is new.
   private isFileNewlyCreated(f: TFile): boolean {
-    // TODO(eht): maybe stick to moment, rather than Date
-    return (Date.now() - f.stat.ctime < kRecentlyCreatedThresholdMillis);
+    return (moment.now() - f.stat.ctime < kRecentlyCreatedThresholdMillis);
   };
 
   // Determines if the file is a daily note, based on the Daily Notes plugin
   // settings.
-  private isDailyNoteFile(f: TFile, dailyNoteSettings: any): boolean {  // TODO(eht): any
+  private isDailyNoteFile(f: TFile, dailyNoteSettings: any): boolean {
     return f.path.startsWith(`${normalizePath(dailyNoteSettings.folder)}/`) &&
         this.parseDateWithFormat(f.basename, dailyNoteSettings.format).isValid();
   }
