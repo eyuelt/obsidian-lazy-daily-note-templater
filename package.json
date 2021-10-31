@@ -1,5 +1,5 @@
 {
-    "name": "lazy-daily-note-templater",
+    "name": "obsidian-lazy-daily-note-templater",
     "version": "0.0.1",
     "description": "Populate lazily-created daily notes with a template.",
     "main": "main.js",
